@@ -9,7 +9,6 @@ from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
-# ─── PAGE CONFIG ──────────────────────────────────────────────
 st.set_page_config(
     page_title="ShapeAI",
     page_icon="🔷",
@@ -17,7 +16,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─── CUSTOM CSS ───────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=Be+Vietnam+Pro:wght@300;400;500;600&family=Caveat:wght@600&display=swap');
@@ -92,89 +90,58 @@ st.markdown(f"""
 CLASS_NAMES = ['Hình tròn','Hình vuông','Hình tam giác','Hình chữ nhật','Hình elip','Ngôi sao']
 CLASS_ICONS = ['⭕','🟦','🔺','▬','🫧','⭐']
 
-# ─── FEATURE EXTRACTION ───────────────────────────────────────
 def extract_features(gray):
-    """Robust feature extraction designed for hand-drawn stroke images."""
-    # ── 1. Pre-process: invert so strokes are WHITE on BLACK ──
     _, bw = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
-
-    # Dilate to thicken thin hand-drawn strokes before analysis
     k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     bw = cv2.dilate(bw, k3, iterations=2)
     bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, k5)
-
     contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-    # Use largest contour
     cnt = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(cnt)
     if area < 80:
         return None
-
     perimeter = cv2.arcLength(cnt, True)
-
-    # ── 2. Hu Moments (rotation-invariant shape descriptor) ──
-    M  = cv2.moments(cnt)
+    M = cv2.moments(cnt)
     hu = cv2.HuMoments(M).flatten()
     hu_log = -np.sign(hu) * np.log10(np.abs(hu) + 1e-10)
-
-    # ── 3. Bounding box ratios ──
     x, y, w, h = cv2.boundingRect(cnt)
-    aspect  = w / (h + 1e-5)
-    sq_diff = abs(aspect - 1.0)          # 0 = square, large = rectangle
-    extent  = area / ((w * h) + 1e-5)
-
-    # ── 4. Circularity (1.0 = perfect circle) ──
+    aspect = w / (h + 1e-5)
+    sq_diff = abs(aspect - 1.0)
+    extent = area / ((w * h) + 1e-5)
     circularity = 4 * np.pi * area / (perimeter ** 2 + 1e-5)
-
-    # ── 5. Convex hull features ──
-    hull       = cv2.convexHull(cnt)
-    hull_area  = cv2.contourArea(hull)
+    hull = cv2.convexHull(cnt)
+    hull_area = cv2.contourArea(hull)
     hull_perim = cv2.arcLength(hull, True)
-    solidity   = area / (hull_area + 1e-5)
-    convexity  = hull_perim / (perimeter + 1e-5)   # <1 means concave (star!)
-
-    # ── 6. Polygon approximation at multiple epsilons ──
+    solidity = area / (hull_area + 1e-5)
+    convexity = hull_perim / (perimeter + 1e-5)
     n_verts = []
     for eps_factor in [0.01, 0.02, 0.04, 0.06]:
         poly = cv2.approxPolyDP(cnt, eps_factor * perimeter, True)
         n_verts.append(len(poly))
-    # clamp to useful range
     n_verts = [min(v, 20) for v in n_verts]
-
-    # ── 7. Ellipse fit ──
     if len(cnt) >= 5:
         (_, _), (ea, eb), _ = cv2.fitEllipse(cnt)
         ellipse_ratio = min(ea, eb) / (max(ea, eb) + 1e-5)
     else:
         ellipse_ratio = 1.0
-
-    # ── 8. Inward concavity ratio  (key for star detection) ──
-    # Fraction of perimeter that is "inside" the convex hull
-    concavity_ratio = 1.0 - convexity   # larger = more star-like
-
-    # ── 9. HOG gradient orientation histogram (8 bins) on 64×64 ──
+    concavity_ratio = 1.0 - convexity
     resized = cv2.resize(gray, (64, 64))
     gx = cv2.Sobel(resized, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(resized, cv2.CV_32F, 0, 1, ksize=3)
     mag, ang = cv2.cartToPolar(gx, gy, angleInDegrees=True)
-    hog_hist, _ = np.histogram(ang.flatten(), bins=16, range=(0, 360),
-                                weights=mag.flatten())
+    hog_hist, _ = np.histogram(ang.flatten(), bins=16, range=(0, 360), weights=mag.flatten())
     hog_hist = hog_hist / (hog_hist.sum() + 1e-5)
-
-    # ── 10. Radial profile (distance from centroid to contour, 36 bins) ──
     if M['m00'] > 0:
         cx_m = M['m10'] / M['m00']
         cy_m = M['m01'] / M['m00']
     else:
         cx_m, cy_m = w / 2, h / 2
-
     angles_rad = np.linspace(0, 2 * np.pi, 36, endpoint=False)
     radial = []
     for a in angles_rad:
-        # cast ray and find contour intersection
         best = 0.0
         for pt in cnt[:, 0]:
             dx = pt[0] - cx_m
@@ -187,35 +154,26 @@ def extract_features(gray):
     radial = np.array(radial)
     max_r = radial.max() + 1e-5
     radial_norm = radial / max_r
-    radial_std  = float(radial_norm.std())   # high std → spiky (star)
-
+    radial_std = float(radial_norm.std())
     feat = np.concatenate([
-        hu_log,                                        # 7
-        [aspect, sq_diff, extent, circularity,         # 4
-         solidity, convexity, concavity_ratio,         # 3
-         ellipse_ratio, radial_std],                   # 2
-        n_verts,                                       # 4
-        hog_hist,                                      # 16
-        radial_norm,                                   # 36
+        hu_log,
+        [aspect, sq_diff, extent, circularity, solidity, convexity, concavity_ratio, ellipse_ratio, radial_std],
+        n_verts,
+        hog_hist,
+        radial_norm,
     ])
     return feat
 
-
-# ─── SYNTHETIC DATASET (stroke-style, like real hand drawing) ──
 def draw_shape_stroke(img, label, cx, cy, sz=64):
-    """Draw shapes as outlines (strokes) to match hand-drawn input."""
     stroke_w = np.random.randint(2, 6)
-    col = 0  # black stroke on white bg
-
-    if label == 0:   # circle
+    col = 0
+    if label == 0:
         r = np.random.randint(16, 26)
         cv2.circle(img, (cx, cy), r, col, stroke_w)
-
-    elif label == 1: # square
+    elif label == 1:
         s = np.random.randint(18, 32)
         cv2.rectangle(img, (cx-s, cy-s), (cx+s, cy+s), col, stroke_w)
-
-    elif label == 2: # triangle
+    elif label == 2:
         jitter = lambda: np.random.randint(-4, 5)
         pts = np.array([
             [cx+jitter(), cy-20+jitter()],
@@ -223,55 +181,45 @@ def draw_shape_stroke(img, label, cx, cy, sz=64):
             [cx+20+jitter(), cy+18+jitter()]
         ], np.int32)
         cv2.polylines(img, [pts], True, col, stroke_w)
-
-    elif label == 3: # rectangle (wider)
+    elif label == 3:
         hw = np.random.randint(18, 28)
         hh = np.random.randint(9, 15)
         cv2.rectangle(img, (cx-hw, cy-hh), (cx+hw, cy+hh), col, stroke_w)
-
-    elif label == 4: # ellipse
-        a  = np.random.randint(18, 26)
-        b  = np.random.randint(8, 14)
+    elif label == 4:
+        a = np.random.randint(18, 26)
+        b = np.random.randint(8, 14)
         angle = np.random.randint(0, 90)
         cv2.ellipse(img, (cx, cy), (a, b), angle, 0, 360, col, stroke_w)
-
-    elif label == 5: # star
+    elif label == 5:
         pts5 = []
         rot = np.random.uniform(0, 2*np.pi/5)
         outer_r = np.random.randint(18, 26)
         inner_r = int(outer_r * 0.42)
         for i in range(5):
-            a  = i * 2*np.pi/5 - np.pi/2 + rot
+            a = i * 2*np.pi/5 - np.pi/2 + rot
             pts5.append([int(cx + outer_r*np.cos(a)), int(cy + outer_r*np.sin(a))])
             a2 = (i+0.5)*2*np.pi/5 - np.pi/2 + rot
             pts5.append([int(cx + inner_r*np.cos(a2)), int(cy + inner_r*np.sin(a2))])
         cv2.polylines(img, [np.array(pts5, np.int32)], True, col, stroke_w)
-        # also fill the star so features are robust
         cv2.fillPoly(img, [np.array(pts5, np.int32)], col)
 
-
 def augment(img):
-    """Apply random affine transforms to simulate varied hand drawings."""
     sz = img.shape[0]
-    # Random rotation
     angle = np.random.uniform(-30, 30)
     M_rot = cv2.getRotationMatrix2D((sz/2, sz/2), angle, 1.0)
     img = cv2.warpAffine(img, M_rot, (sz, sz), borderValue=255)
-    # Random scale
     scale = np.random.uniform(0.75, 1.15)
     M_sc = cv2.getRotationMatrix2D((sz/2, sz/2), 0, scale)
     img = cv2.warpAffine(img, M_sc, (sz, sz), borderValue=255)
-    # Random translation
     tx, ty = np.random.randint(-8, 9), np.random.randint(-8, 9)
     M_tr = np.float32([[1, 0, tx], [0, 1, ty]])
     img = cv2.warpAffine(img, M_tr, (sz, sz), borderValue=255)
     return img
 
-
 def make_dataset(n=8000, sz=64):
     X, y = [], []
     for _ in range(n):
-        img   = np.full((sz, sz), 255, dtype=np.uint8)
+        img = np.full((sz, sz), 255, dtype=np.uint8)
         label = np.random.randint(0, 6)
         cx = sz//2 + np.random.randint(-6, 7)
         cy = sz//2 + np.random.randint(-6, 7)
@@ -283,25 +231,17 @@ def make_dataset(n=8000, sz=64):
             y.append(label)
     return np.array(X), np.array(y)
 
-
-# ─── VOTING ENSEMBLE ──────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_model():
     X, y = make_dataset(8000)
     scaler = StandardScaler()
     X_s = scaler.fit_transform(X)
-
-    gb  = GradientBoostingClassifier(n_estimators=400, learning_rate=0.08,
-                                      max_depth=5, subsample=0.8, random_state=42)
-    rf  = RandomForestClassifier(n_estimators=400, max_depth=None,
-                                  min_samples_leaf=2, random_state=42, n_jobs=-1)
+    gb = GradientBoostingClassifier(n_estimators=400, learning_rate=0.08, max_depth=5, subsample=0.8, random_state=42)
+    rf = RandomForestClassifier(n_estimators=400, max_depth=None, min_samples_leaf=2, random_state=42, n_jobs=-1)
     svm = SVC(kernel='rbf', C=10, gamma='scale', probability=True, random_state=42)
-
     gb.fit(X_s, y)
     rf.fit(X_s, y)
     svm.fit(X_s, y)
-
-    # Soft voting: average predicted probabilities
     ensemble = VotingClassifier(
         estimators=[('gb', gb), ('rf', rf), ('svm', svm)],
         voting='soft'
@@ -309,8 +249,6 @@ def load_model():
     ensemble.fit(X_s, y)
     return ensemble, scaler
 
-
-# ─── LOADING ──────────────────────────────────────────────────
 if "model_ready" not in st.session_state:
     st.session_state.model_ready = False
 
@@ -322,7 +260,6 @@ if not st.session_state.model_ready:
 else:
     model, scaler = load_model()
 
-# ─── DRAWING TOOLS ────────────────────────────────────────────
 st.markdown('<div class="section-label">🖊️ Bảng vẽ của bạn</div>', unsafe_allow_html=True)
 st.markdown('<div class="section-hint">Vẽ tự do bất kỳ hình học nào — tròn, vuông, tam giác, chữ nhật, elip hay ngôi sao</div>', unsafe_allow_html=True)
 
@@ -363,7 +300,6 @@ st.markdown("""
 st.markdown("<br>", unsafe_allow_html=True)
 btn_predict = st.button("🔍 Đoán hình ngay!", use_container_width=True)
 
-# ─── PREDICTION ───────────────────────────────────────────────
 if btn_predict:
     if canvas_result.image_data is None:
         st.warning("✏️ Hãy vẽ một hình trước nhé!")
@@ -375,23 +311,21 @@ if btn_predict:
         else:
             with st.spinner("🤖 AI đang phân tích…"):
                 rgba = Image.fromarray(img_arr, 'RGBA')
-                bg   = Image.new('RGB', rgba.size, (255, 255, 255))
+                bg = Image.new('RGB', rgba.size, (255, 255, 255))
                 bg.paste(rgba, mask=rgba.split()[3])
                 gray = np.array(bg.convert('L'))
-
                 feat = extract_features(gray)
                 if feat is None:
                     st.warning("⚠️ Không tìm thấy hình nào — hãy vẽ rõ hơn nhé!")
                 else:
                     feat_s = scaler.transform(feat.reshape(1, -1))
-                    proba  = model.predict_proba(feat_s)[0]
-                    idx    = int(np.argmax(proba))
-                    conf   = float(proba[idx]) * 100
+                    proba = model.predict_proba(feat_s)[0]
+                    idx = int(np.argmax(proba))
+                    conf = float(proba[idx]) * 100
                     time.sleep(0.2)
-
             if feat is not None:
-                icon  = CLASS_ICONS[idx]
-                name  = CLASS_NAMES[idx]
+                icon = CLASS_ICONS[idx]
+                name = CLASS_NAMES[idx]
                 st.markdown(f"""
 <div class="result-card">
   <div class="result-emoji">{icon}</div>
@@ -401,12 +335,11 @@ if btn_predict:
     <div class="confidence-bar-fill" style="width:{int(conf)}%"></div>
   </div>
 </div>""", unsafe_allow_html=True)
-
                 st.markdown("<br>", unsafe_allow_html=True)
                 st.markdown('<div class="section-label" style="font-size:0.95rem;">📊 Phân tích chi tiết</div>', unsafe_allow_html=True)
                 prob_rows = ""
                 for i in np.argsort(proba)[::-1]:
-                    p    = float(proba[i]) * 100
+                    p = float(proba[i]) * 100
                     bold = "font-weight:700;color:#0d1b3e;" if i == idx else ""
                     prob_rows += f"""
 <div class="prob-row">
@@ -420,7 +353,6 @@ if btn_predict:
                     f'<div style="background:#fff;border:1.5px solid #d4dae8;border-radius:12px;padding:1rem 1.25rem;">{prob_rows}</div>',
                     unsafe_allow_html=True)
 
-# ─── TIPS ─────────────────────────────────────────────────────
 st.markdown("""
 <div class="tips-card">
   <b>💡 Mẹo vẽ tốt hơn</b><br>
